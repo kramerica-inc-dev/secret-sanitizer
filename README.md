@@ -1,0 +1,247 @@
+# Secret Sanitizer
+
+A web-based security tool that detects and redacts sensitive information from text, files, and documents before sharing, exporting, or archiving.
+
+## What it does
+
+Paste text or upload files → the sanitizer scans for secrets and PII → outputs a redacted version ready to share safely.
+
+### Detection engines
+
+Secret Sanitizer uses a three-layer scan pipeline. Each layer adds deeper detection:
+
+| Mode | Engines | Detects |
+|---|---|---|
+| ⚡ **Quick** | Gitleaks | API keys, tokens, passwords, Basic Auth, SSH keys, credentials in code |
+| 🔍 **Standard** | + Presidio | IBAN, BSN, credit cards, email, phone numbers, IP addresses, URLs |
+| 🔬 **Deep** | + Deduce | Dutch person names, organizations, locations, dates, ages |
+
+### Supported input
+
+- **Paste text:** JSON, YAML, TOML, Markdown, scripts, logs, config files
+- **Upload files:** All text formats + PDF (.pdf) and Word (.docx) with automatic text extraction
+- **Max file size:** 50MB
+
+### Output
+
+Redacted text with tagged replacements:
+- Credentials: `[REDACTED:rule-id]`
+- Structured PII: `[ENTITY_TYPE]` (e.g., `[IBAN_CODE]`, `[EMAIL_ADDRESS]`)
+- Dutch PII: `[PERSOON]`, `[LOCATIE]`, `[ORGANISATIE]`
+
+---
+
+## Architecture
+
+```
+Internet → DNS (secret.yourdomain.com)
+  → Reverse proxy / NPMplus (SSL termination)
+    → Authelia (2FA authentication)
+      → LXC container
+          ├── Node.js 20 + Express (port 3100)
+          │   ├── Gitleaks 8.22.1 (Go binary, CLI)
+          │   ├── Text extraction (pdftotext + mammoth)
+          │   └── Pipeline orchestrator
+          └── Python 3.11 + Flask (port 5002)
+              ├── Presidio Analyzer + spaCy nl_core_news_lg
+              │   └── Custom recognizers (BSN, KvK, NL phone)
+              └── Deduce 3.x (Dutch NLP de-identification)
+```
+
+### Scan pipeline flow
+
+```
+Input (text or file)
+  │
+  ├─ File type detection
+  │   ├─ Text → direct
+  │   ├─ PDF → pdftotext → text
+  │   └─ Word → mammoth → text
+  │
+  ▼
+┌─────────────────────────────────┐
+│  Layer 1: Gitleaks (always)     │  → Credentials, tokens, secrets
+│  Layer 2: Presidio (standard+)  │  → IBAN, BSN, email, phone, IP
+│  Layer 3: Deduce (deep only)    │  → Dutch names, orgs, locations
+└─────────────────────────────────┘
+  │
+  ▼
+Merge & deduplicate findings
+  │
+  ▼
+Redacted output + findings report
+```
+
+---
+
+## API
+
+### `POST /api/sanitize`
+
+Scan pasted text.
+
+```json
+{
+  "text": "Jan de Vries heeft IBAN NL91ABNA0417164300",
+  "depth": "deep"
+}
+```
+
+Response:
+```json
+{
+  "sanitized": "[PERSON] heeft IBAN [IBAN_CODE]",
+  "findings": [
+    {"source": "presidio", "rule": "PERSON", "text": "Jan de Vries", "score": 0.85},
+    {"source": "presidio", "rule": "IBAN_CODE", "text": "NL91ABNA0417164300", "score": 1.0}
+  ],
+  "count": 2,
+  "layers": {"gitleaks": 0, "presidio": 2, "deduce": 1},
+  "depth": "deep"
+}
+```
+
+### `POST /api/sanitize-file`
+
+Scan uploaded file (multipart/form-data).
+
+- Field `file`: the file to scan
+- Field `depth`: `"quick"`, `"standard"`, or `"deep"`
+
+Returns the same response format, plus `filename`, `size`, and for PDF/Word: `extracted`, `sourceType`, `extractedLength`.
+
+### `GET /health`
+
+Returns status of all components:
+```json
+{
+  "status": "ok",
+  "gitleaks": "8.22.1",
+  "pdftotext": "22.12.0",
+  "mammoth": "included",
+  "pii_service": {
+    "status": "ok",
+    "engine": "presidio+deduce",
+    "language": "nl",
+    "model": "nl_core_news_lg",
+    "deduce": "3.x",
+    "custom_recognizers": ["BSN", "KVK_NUMBER", "NL_PHONE_NUMBER"]
+  }
+}
+```
+
+---
+
+## Project structure
+
+```
+/opt/secret-sanitizer/
+├── server.js               # Node.js Express server + pipeline orchestrator
+├── pii_service.py           # Python Flask microservice (Presidio + Deduce)
+├── package.json             # Node.js dependencies
+├── .gitleaks.toml           # Custom Gitleaks config (8 rules + defaults)
+├── pii-venv/                # Python virtual environment
+└── public/
+    └── index.html           # Web UI (dark theme, scan depth selector)
+
+/usr/local/bin/gitleaks      # Gitleaks 8.22.1 binary
+/usr/bin/pdftotext           # Poppler-utils (PDF extraction)
+```
+
+### Services
+
+| Service | File | Port | Description |
+|---|---|---|---|
+| `secret-sanitizer` | server.js | 3100 | Main API + web UI |
+| `pii-service` | pii_service.py | 5002 | Presidio + Deduce PII detection |
+
+---
+
+## Detection details
+
+### Gitleaks (Layer 1)
+
+Custom `.gitleaks.toml` with 8 rules extending the default Gitleaks ruleset, optimized for n8n workflow patterns:
+
+- `Buffer.from()` credentials (Basic Auth in n8n Code nodes)
+- Basic Auth headers with encoded credentials
+- Password/secret in quoted assignments
+- Plain text credentials (login/password/username followed by value, with extensive allowlist)
+- Unquoted key=value credentials (env files, configs)
+- n8n credential references with embedded IDs
+- High-entropy hex strings in JSON values
+- curl credentials
+
+Global allowlist excludes node_modules, .git, package-lock.json, cache directories, and placeholder patterns.
+
+### Presidio (Layer 2)
+
+Microsoft Presidio with Dutch spaCy NLP model (`nl_core_news_lg`).
+
+**Built-in recognizers:** EMAIL_ADDRESS, IBAN_CODE, CREDIT_CARD, IP_ADDRESS, URL, PHONE_NUMBER, PERSON, LOCATION, ORGANIZATION
+
+**Custom recognizers:**
+
+| Entity | Description | Validation |
+|---|---|---|
+| `BSN` | Burgerservicenummer (9 digits) | Elfproef (11-test) mathematical validation |
+| `KVK_NUMBER` | Kamer van Koophandel (8 digits) | Context keyword boosting |
+| `NL_PHONE_NUMBER` | Dutch phone numbers | +31, 06-, landline patterns |
+
+Confidence threshold: 0.5 (configurable per request).
+
+### Deduce (Layer 3)
+
+Dutch-specific de-identification by UMC Utrecht. Rule-based + lookup tables.
+
+Detects: person names (incl. tussenvoegsels), locations, institutions, hospitals, phone numbers, email, BSN, patient numbers, dates, ages.
+
+### Findings merge
+
+When multiple engines detect the same text span, the merge algorithm deduplicates by position. On overlap, the finding with the higher confidence score wins. On tie: Gitleaks > Presidio > Deduce (source priority).
+
+---
+
+## Infrastructure requirements
+
+| Property | Value |
+|---|---|
+| OS | Debian 12 (or compatible) |
+| RAM | 2GB + 1GB swap (minimum for all three layers) |
+| Disk | 8GB (Python packages + spaCy model) |
+| CPU | 2 cores recommended |
+| Node.js | 20.x |
+| Python | 3.11+ |
+
+For Quick mode only (Gitleaks), 256MB RAM and 4GB disk is sufficient.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for full installation instructions.
+
+---
+
+## Context
+
+n8n workflow JSON exports contain hardcoded credentials that can't be isolated via n8n's credential system — particularly `Buffer.from('user:pass')` in Code nodes and tokens in query parameters. `process.env` is unavailable in the n8n Code node sandbox, so passwords must remain in the code. Secret Sanitizer is the safety net: before sharing a workflow JSON, run it through the sanitizer.
+
+---
+
+## Acknowledgments
+
+This project builds on the following open-source tools:
+
+- [Gitleaks](https://github.com/gitleaks/gitleaks) — Secret detection in code via regex and entropy analysis
+- [Microsoft Presidio](https://github.com/microsoft/presidio) — PII detection and anonymization framework
+- [Deduce](https://github.com/vmminidept/deduce) — Dutch de-identification by UMC Utrecht
+- [spaCy](https://spacy.io/) — Industrial-strength NLP, used with the `nl_core_news_lg` Dutch model
+- [Express](https://expressjs.com/) — Node.js web framework
+- [Flask](https://flask.palletsprojects.com/) — Python microservice framework
+- [mammoth](https://github.com/mwilliamson/mammoth.js) — Word document (.docx) text extraction
+- [Poppler](https://poppler.freedesktop.org/) — PDF text extraction via `pdftotext`
+- [Authelia](https://www.authelia.com/) — Authentication and 2FA gateway
+- [NPMplus](https://github.com/ZoeyVid/NPMplus) — Reverse proxy management
+
+---
+
+## License
+
+Private project — not licensed for redistribution.

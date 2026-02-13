@@ -1,0 +1,128 @@
+# Secret Sanitizer — Custom Gitleaks Configuration
+# Extends default Gitleaks rules with patterns for n8n workflows and plain text credentials
+# Last updated: 2026-02-13
+
+[extend]
+useDefault = true
+
+# === CUSTOM RULES ===
+
+# 1. Buffer.from() credentials — Basic Auth in n8n Code nodes
+[[rules]]
+id = "basic-auth-credentials"
+description = "Basic Auth credentials in Buffer.from()"
+regex = '''Buffer\.from\(\s*['"](([^'"]*:[^'"]+))['"]\s*\)'''
+secretGroup = 1
+keywords = ["Buffer.from"]
+tags = ["credential", "basic-auth", "n8n"]
+
+# 2. Basic Auth header with encoded credentials
+[[rules]]
+id = "basic-auth-header"
+description = "Basic Auth header with encoded credentials"
+regex = '''Basic\s+(([A-Za-z0-9+/=]{10,}))'''
+secretGroup = 1
+keywords = ["Basic"]
+tags = ["credential", "basic-auth"]
+
+# 3. Password/secret in quoted assignment (code patterns)
+[[rules]]
+id = "password-in-string"
+description = "Password or secret in quoted variable assignment"
+regex = '''(?i)(?:password|passwd|pwd|wachtwoord|secret|token|apikey|api_key)\s*[:=]\s*['"]([^'"]{4,})['"]'''
+secretGroup = 1
+keywords = ["password", "passwd", "pwd", "wachtwoord", "secret", "token", "apikey", "api_key"]
+tags = ["credential", "hardcoded"]
+[rules.allowlist]
+regexes = [
+  '''(?i)^(?:REPLACE_WITH_YOUR|YOUR_.*_HERE|CHANGE_?ME|example|test|dummy|sample|placeholder|todo|fixme)$''',
+]
+
+# 4. Plain text credentials — login/password/username followed by a value
+#    Catches: "password driekeerraden", "login mijnusernaam", "user: admin"
+[[rules]]
+id = "plaintext-credential"
+description = "Plain text credential (login, password, username followed by value)"
+regex = '''(?i)(?:password|passwd|pwd|wachtwoord|login|username|user|gebruiker|gebruikersnaam)\s*[:\s]\s*([^\s'"={}\[\]<>()]{3,})'''
+secretGroup = 1
+keywords = ["password", "passwd", "pwd", "wachtwoord", "login", "username", "user", "gebruiker", "gebruikersnaam"]
+tags = ["credential", "plaintext"]
+[rules.allowlist]
+regexes = [
+  '''(?i)^(?:null|true|false|none|undefined|required|optional|string|number|boolean|field|input|prompt|label|placeholder|change|changeme|forgot|reset|new|old|confirm|your|my|the|that|this|with|for|from|into|has|was|are|will|can|not|does|should|must|may|been|have|had|but|then|than|just|only|here|there|where|when|how|what|which|who|why|its|our|their|page|form|screen|dialog|modal|error|failed|success|invalid|valid|correct|incorrect|wrong|right|attempt|denied|granted|accepted|rejected|expired|locked|unlocked|enabled|disabled|active|inactive|pending|loading|manager|handler|service|controller|provider|factory|helper|util|config|setting|option|param|value|type|name|text|data|info|file|path|url|link|check|test|verify|validate|generate|create|update|delete|display|show|hide|open|close|start|stop|enable|disable|allow|deny|accept|reject|beleid|beheer|invoer|veld|verplicht|optioneel|vergeten|nieuw|oud|bevestig|wijzig|herstel|fout|mislukt|gelukt|ongeldig|geldig|verlopen|geblokkeerd|actief|inactief)$''',
+  '''\$\{''',
+  '''\{\{''',
+  '''process\.env''',
+]
+
+# 5. Unquoted key=value credentials (env files, configs)
+#    Catches: "TOKEN=abc123def456ghi789", "PASSWORD=MyS3cretP@ss"
+[[rules]]
+id = "unquoted-credential-assignment"
+description = "Unquoted credential in key=value assignment"
+regex = '''(?i)(?:password|passwd|pwd|secret|token|apikey|api_key|api_secret|access_key|auth_token)\s*=\s*([^\s'"]{8,})'''
+secretGroup = 1
+keywords = ["password", "passwd", "pwd", "secret", "token", "apikey", "api_key", "api_secret", "access_key", "auth_token"]
+tags = ["credential", "env", "config"]
+[rules.allowlist]
+regexes = [
+  '''\$\{''',
+  '''\{\{''',
+  '''process\.env''',
+  '''(?i)^(?:null|true|false|none|undefined|changeme|replace_with|your_.*_here)$''',
+]
+
+# 6. n8n credential reference with ID
+[[rules]]
+id = "n8n-credential-ref"
+description = "n8n credential reference with embedded ID"
+regex = '''"(?:httpHeaderAuth|oAuth2Api|httpBasicAuth|httpDigestAuth)":\s*\{[^}]*"id":\s*"([^"]+)"'''
+secretGroup = 1
+keywords = ["httpHeaderAuth", "oAuth2Api", "httpBasicAuth", "httpDigestAuth"]
+tags = ["n8n", "credential-ref"]
+
+# 7. High-entropy hex string in JSON value (tokens, hashes)
+#    Catches: "token": "c6c489cb3c494130fcac4f1d482ec823"
+[[rules]]
+id = "high-entropy-json-value"
+description = "High-entropy hex string in JSON value (likely token or API key)"
+regex = ''':\s*"(([0-9a-f]{32,}))"'''
+secretGroup = 1
+tags = ["credential", "entropy"]
+[rules.allowlist]
+regexes = [
+  '''[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}''',
+]
+
+# 8. curl with credentials
+[[rules]]
+id = "curl-credentials"
+description = "Credentials passed to curl command"
+regex = '''curl\s+.*(?:-u|--user)\s+['"]?([^'":\s]+:[^'":\s]+)['"]?'''
+secretGroup = 1
+keywords = ["curl"]
+tags = ["credential", "curl"]
+
+# === GLOBAL ALLOWLIST ===
+# Suppresses false positives from dependency files, caches, and placeholder values
+
+[allowlist]
+paths = [
+  '''node_modules/''',
+  '''\.git/''',
+  '''package-lock\.json$''',
+  '''yarn\.lock$''',
+  '''\.cache/''',
+  '''site-packages/''',
+  '''venv/''',
+  '''\.npm/'''
+]
+regexes = [
+  '''(?i)REPLACE_WITH_YOUR''',
+  '''(?i)YOUR_.*_HERE''',
+  '''(?i)CHANGE_?ME''',
+  '''(?i)example\.com''',
+  '''(?i)xxx+''',
+  '''(?i)<(?:password|token|secret|key)>''',
+  '''files\.pythonhosted\.org/packages/''',
+]
