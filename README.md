@@ -242,6 +242,10 @@ This project builds on the following open-source tools:
 
 ---
 
+## Contributing
+
+This repository is for personal use, but feel free to fork and adapt for your own workflow!
+
 ## License
 
-Private project — not licensed for redistribution.
+Personal project — use freely
