@@ -28,6 +28,7 @@
 - Findings panel shows `x-ref` source tag with reason indicator (propagated / from email)
 - Deep mode label updated to mention cross-reference
 - Version shown in privacy modal
+- Scan history off by default — toggle switch in history drawer to enable (stored in localStorage)
 
 ### Changed
 - `server.js`: version in health endpoint, console sanitization active on startup, audit entries on every scan
