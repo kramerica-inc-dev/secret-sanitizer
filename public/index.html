@@ -64,6 +64,7 @@ textarea::placeholder{color:#4b5563}
 .layer-badge.gitleaks{background:#052e16;color:#6ee7b7}
 .layer-badge.presidio{background:#172554;color:#93c5fd}
 .layer-badge.deduce{background:#3b0764;color:#d8b4fe}
+.layer-badge.crossReference{background:#4a1d6a;color:#c084fc}
 .layer-badge.error{background:#7f1d1d;color:#fca5a5}
 .findings-panel{max-height:140px;overflow-y:auto;margin-bottom:8px;border:1px solid #222;border-radius:6px}
 .finding-row{font-size:12px;padding:4px 8px;border-bottom:1px solid #1a1a1a;display:flex;align-items:center;gap:6px;color:#9ca3af}
@@ -72,8 +73,10 @@ textarea::placeholder{color:#4b5563}
 .finding-src.gitleaks{background:#052e16;color:#6ee7b7}
 .finding-src.presidio{background:#172554;color:#93c5fd}
 .finding-src.deduce{background:#3b0764;color:#d8b4fe}
+.finding-src.cross-reference{background:#4a1d6a;color:#c084fc}
 .finding-type{color:#6b7280;min-width:100px}
 .finding-text{color:#e0e0e0;font-family:"SF Mono",monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.finding-reason{font-size:10px;color:#6b7280;font-style:italic}
 .history-drawer{position:fixed;right:-400px;top:0;bottom:0;width:400px;background:#111;border-left:1px solid #222;transition:right .3s;z-index:100;display:flex;flex-direction:column}
 .history-drawer.open{right:0}
 .history-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99;display:none}
@@ -92,6 +95,18 @@ textarea::placeholder{color:#4b5563}
 @keyframes spin{to{transform:rotate(360deg)}}
 .btn-delete{background:none;border:none;cursor:pointer;float:right;font-size:14px;opacity:.4;padding:2px 4px;border-radius:4px}.btn-delete:hover{opacity:1;background:#1a0505}
 .hidden{display:none!important}
+.privacy-link{color:#6b7280;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px}
+.privacy-link:hover{color:#9ca3af}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:#1a1a1a;border:1px solid #333;border-radius:12px;max-width:560px;width:90%;max-height:80vh;overflow-y:auto;padding:24px}
+.modal h2{font-size:16px;color:#10b981;margin-bottom:16px}
+.modal h3{font-size:13px;color:#9ca3af;margin-top:16px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em}
+.modal p,.modal li{font-size:13px;color:#ccc;line-height:1.7}
+.modal ul{padding-left:20px;margin-bottom:12px}
+.modal li{margin-bottom:4px}
+.modal-close{float:right;background:none;border:none;color:#6b7280;font-size:18px;cursor:pointer;padding:4px 8px}
+.modal-close:hover{color:#e0e0e0}
 @media(max-width:768px){main{flex-direction:column}.panel-left{border-right:none;border-bottom:1px solid #222}.history-drawer{width:100%;right:-100%}}
 </style>
 </head>
@@ -113,9 +128,9 @@ textarea::placeholder{color:#4b5563}
 <div class="scan-depth">
 <div class="depth-btn active" data-depth="quick" onclick="setDepth('quick')" title="Gitleaks only &#8212; credentials, tokens, API keys">&#x26a1; Quick</div>
 <div class="depth-btn" data-depth="standard" onclick="setDepth('standard')" title="+ Presidio &#8212; IBAN, BSN, email, phone, IP">&#x1f50d; Standard</div>
-<div class="depth-btn" data-depth="deep" onclick="setDepth('deep')" title="+ Deduce &#8212; Dutch names, organizations, locations">&#x1f52c; Deep</div>
+<div class="depth-btn" data-depth="deep" onclick="setDepth('deep')" title="+ Deduce + cross-reference &#8212; Dutch names, organizations, locations">&#x1f52c; Deep</div>
 </div>
-<textarea id="input" placeholder="Paste your code, config, logs, or any text here...&#10;&#10;Use the scan depth selector:&#10;  &#x26a1; Quick &#8212; credentials only (Gitleaks)&#10;  &#x1f50d; Standard &#8212; + PII detection (Presidio)&#10;  &#x1f52c; Deep &#8212; + Dutch names &amp; orgs (Deduce)"></textarea>
+<textarea id="input" placeholder="Paste your code, config, logs, or any text here...&#10;&#10;Use the scan depth selector:&#10;  &#x26a1; Quick &#8212; credentials only (Gitleaks)&#10;  &#x1f50d; Standard &#8212; + PII detection (Presidio)&#10;  &#x1f52c; Deep &#8212; + Dutch names &amp; orgs (Deduce) + cross-reference"></textarea>
 <div id="dropZoneContainer" class="hidden" style="flex:1;display:flex;flex-direction:column;gap:12px">
 <div class="drop-zone" id="dropZone">
 <input type="file" id="fileInput" accept=".json,.yaml,.yml,.toml,.env,.sh,.bash,.log,.txt,.md,.xml,.csv,.ini,.cfg,.conf,.properties,.py,.js,.ts,.html,.css,.pdf,.docx">
@@ -149,13 +164,42 @@ Supports text files, .json, .yaml, .toml, .env, .sh, .log, .md, .pdf, .docx and 
 <div class="output-area" id="output"><span class="output-placeholder" id="outputPlaceholder">Sanitized output will appear here...</span></div>
 </div>
 </main>
-<div class="status-bar"><span id="status">Ready</span><span id="lastRun"></span></div>
+<div class="status-bar"><span id="status">Ready</span><span style="display:flex;gap:16px;align-items:center"><span class="privacy-link" onclick="togglePrivacy()">&#x1f512; Privacy</span><span id="lastRun"></span></span></div>
 <div class="history-overlay" id="historyOverlay" onclick="toggleHistory()"></div>
 <div class="history-drawer" id="historyDrawer">
 <div class="history-header"><h2>History</h2><button class="btn" onclick="toggleHistory()">&#x2715;</button></div>
 <div class="history-list" id="historyList"></div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="modal-overlay" id="privacyOverlay" onclick="if(event.target===this)togglePrivacy()">
+<div class="modal">
+<button class="modal-close" onclick="togglePrivacy()">&#x2715;</button>
+<h2>&#x1f512; Privacy &amp; Data Protection</h2>
+<p>Secret Sanitizer is designed with <strong>data minimization</strong> as its core principle. Your data is processed, not stored.</p>
+<h3>How your data is processed</h3>
+<ul>
+<li><strong>Local processing:</strong> All scans run on the server — nothing is sent to external services</li>
+<li><strong>No storage:</strong> Text and files are wiped from memory immediately after processing (memory wipe)</li>
+<li><strong>Temp files:</strong> Temporary files are deleted after each scan and automatically cleaned up by the system</li>
+<li><strong>No content logging:</strong> Logs contain only metadata (timing, counts, file type) — never the content of your text or files</li>
+<li><strong>Console filtering:</strong> PII patterns (BSN, IBAN, phone numbers) are automatically filtered from all log output</li>
+</ul>
+<h3>What is retained</h3>
+<ul>
+<li><strong>Scan history:</strong> Stored in your browser (localStorage), not on the server. Expires automatically after 24 hours. You can clear it anytime via the History button.</li>
+<li><strong>Audit logs:</strong> Metadata only — timestamp, scan depth, findings count, file type and size. Automatically deleted after 48 hours.</li>
+</ul>
+<h3>Security</h3>
+<ul>
+<li>HTTPS encryption (SSL/TLS)</li>
+<li>Two-factor authentication (Authelia 2FA)</li>
+<li>Rate limiting on all API endpoints</li>
+<li>Core dumps disabled</li>
+<li>Security headers via Helmet</li>
+</ul>
+<p style="margin-top:16px;color:#6b7280;font-size:12px">Secret Sanitizer v1.1.0 &bull; No external services &bull; No tracking &bull; No cookies</p>
+</div>
+</div>
 <script>
 const HISTORY_KEY="ss_history",MAX_HISTORY=50,TTL=86400000;
 let history=loadHistory(), currentTab="text", selectedFile=null, scanDepth="quick";
@@ -211,7 +255,7 @@ function removeFile(){
 
 async function sanitize(){
   var status=document.getElementById("status");
-  var depthLabel=scanDepth==="deep"?"Deep scanning (3 layers)...":scanDepth==="standard"?"Scanning (2 layers)...":"Scanning...";
+  var depthLabel=scanDepth==="deep"?"Deep scanning (3 layers + cross-ref)...":scanDepth==="standard"?"Scanning (2 layers)...":"Scanning...";
 
   if(currentTab==="file"){
     if(!selectedFile){showToast("No file selected");return}
@@ -258,11 +302,12 @@ function showResult(data,previewText){
   var badge=document.getElementById("findingsBadge");
   badge.innerHTML=count>0?'<span class="findings-badge">'+count+" finding"+(count>1?"s":"")+" redacted</span>":'<span class="findings-badge clean">Clean \u2713</span>';
 
+  // Layer badges
   var lb=document.getElementById("layerBadges");
   if(data.layers){
     lb.classList.remove("hidden");
     lb.innerHTML="";
-    var layerNames={gitleaks:"Gitleaks",presidio:"Presidio",deduce:"Deduce"};
+    var layerNames={gitleaks:"Gitleaks",presidio:"Presidio",deduce:"Deduce",crossReference:"Cross-ref"};
     for(var key in data.layers){
       var val=data.layers[key];
       var span=document.createElement("span");
@@ -271,12 +316,13 @@ function showResult(data,previewText){
         span.textContent=layerNames[key]+": "+val;
       }else{
         span.className="layer-badge error";
-        span.textContent=layerNames[key]+": error";
+        span.textContent=(layerNames[key]||key)+": error";
       }
       lb.appendChild(span);
     }
   }else{lb.classList.add("hidden")}
 
+  // Findings panel
   var fp=document.getElementById("findingsPanel");
   if(data.findings&&data.findings.length>0){
     fp.classList.remove("hidden");
@@ -286,7 +332,7 @@ function showResult(data,previewText){
       row.className="finding-row";
       var src=document.createElement("span");
       src.className="finding-src "+f.source;
-      src.textContent=f.source;
+      src.textContent=f.source==="cross-reference"?"x-ref":f.source;
       var type=document.createElement("span");
       type.className="finding-type";
       type.textContent=f.rule;
@@ -294,6 +340,12 @@ function showResult(data,previewText){
       txt.className="finding-text";
       txt.textContent=f.text.length>60?f.text.substring(0,60)+"...":f.text;
       row.appendChild(src);row.appendChild(type);row.appendChild(txt);
+      if(f.reason){
+        var reason=document.createElement("span");
+        reason.className="finding-reason";
+        reason.textContent=f.reason==="value-propagation"?"propagated":f.reason==="email-extraction"?"from email":"";
+        if(reason.textContent)row.appendChild(reason);
+      }
       fp.appendChild(row);
     });
   }else{fp.classList.add("hidden")}
@@ -334,6 +386,10 @@ function toggleHistory(){
   document.getElementById("historyDrawer").classList.toggle("open");
   document.getElementById("historyOverlay").classList.toggle("open");
   renderHistory();
+}
+
+function togglePrivacy(){
+  document.getElementById("privacyOverlay").classList.toggle("open");
 }
 
 function renderHistory(){

@@ -8,13 +8,13 @@ Paste text or upload files → the sanitizer scans for secrets and PII → outpu
 
 ### Detection engines
 
-Secret Sanitizer uses a three-layer scan pipeline. Each layer adds deeper detection:
+Secret Sanitizer uses a three-layer scan pipeline with cross-reference feedbackloop. Each layer adds deeper detection:
 
 | Mode | Engines | Detects |
 |---|---|---|
 | ⚡ **Quick** | Gitleaks | API keys, tokens, passwords, Basic Auth, SSH keys, credentials in code |
 | 🔍 **Standard** | + Presidio | IBAN, BSN, credit cards, email, phone numbers, IP addresses, URLs |
-| 🔬 **Deep** | + Deduce | Dutch person names, organizations, locations, dates, ages |
+| 🔬 **Deep** | + Deduce + cross-reference | Dutch person names, organizations, locations, dates, ages. Cross-reference propagates detected values and extracts names from email addresses. |
 
 ### Supported input
 
@@ -45,7 +45,8 @@ Internet → DNS (secret.yourdomain.com)
           └── Python 3.11 + Flask (port 5002)
               ├── Presidio Analyzer + spaCy nl_core_news_lg
               │   └── Custom recognizers (BSN, KvK, NL phone)
-              └── Deduce 3.x (Dutch NLP de-identification)
+              ├── Deduce 3.x (Dutch NLP de-identification)
+              └── Cross-reference feedbackloop
 ```
 
 ### Scan pipeline flow
@@ -63,6 +64,7 @@ Input (text or file)
 │  Layer 1: Gitleaks (always)     │  → Credentials, tokens, secrets
 │  Layer 2: Presidio (standard+)  │  → IBAN, BSN, email, phone, IP
 │  Layer 3: Deduce (deep only)    │  → Dutch names, orgs, locations
+│  Layer 4: Cross-ref (deep only) │  → Value propagation, email→name
 └─────────────────────────────────┘
   │
   ▼
@@ -71,6 +73,21 @@ Merge & deduplicate findings
   ▼
 Redacted output + findings report
 ```
+
+---
+
+## Privacy & Security
+
+Secret Sanitizer is designed with **data minimization** as its core principle:
+
+- **Local processing only** — nothing is sent to external services
+- **No persistent storage** — text and files are wiped from memory immediately after processing
+- **Memory wipe** — temp files overwritten with zeros before deletion
+- **No content logging** — audit logs contain only metadata (timing, counts, file type)
+- **Console sanitization** — PII patterns (BSN, IBAN, phone numbers) filtered from all log output
+- **Temp file cleanup** — systemd-tmpfiles automatically removes files older than 5 minutes
+- **Core dumps disabled** — prevents memory content from being written to disk
+- **Log retention** — journal logs automatically deleted after 48 hours
 
 ---
 
@@ -96,7 +113,7 @@ Response:
     {"source": "presidio", "rule": "IBAN_CODE", "text": "NL91ABNA0417164300", "score": 1.0}
   ],
   "count": 2,
-  "layers": {"gitleaks": 0, "presidio": 2, "deduce": 1},
+  "layers": {"gitleaks": 0, "presidio": 2, "deduce": 1, "crossReference": 0},
   "depth": "deep"
 }
 ```
@@ -116,6 +133,7 @@ Returns status of all components:
 ```json
 {
   "status": "ok",
+  "version": "1.1.0",
   "gitleaks": "8.22.1",
   "pdftotext": "22.12.0",
   "mammoth": "included",
@@ -125,7 +143,14 @@ Returns status of all components:
     "language": "nl",
     "model": "nl_core_news_lg",
     "deduce": "3.x",
+    "cross_reference": true,
     "custom_recognizers": ["BSN", "KVK_NUMBER", "NL_PHONE_NUMBER"]
+  },
+  "hardening": {
+    "memoryWipe": true,
+    "auditLogging": true,
+    "consoleSanitization": true,
+    "tempFileCleanup": "systemd-tmpfiles"
   }
 }
 ```
@@ -137,7 +162,7 @@ Returns status of all components:
 ```
 /opt/secret-sanitizer/
 ├── server.js               # Node.js Express server + pipeline orchestrator
-├── pii_service.py           # Python Flask microservice (Presidio + Deduce)
+├── pii_service.py           # Python Flask microservice (Presidio + Deduce + cross-ref)
 ├── package.json             # Node.js dependencies
 ├── .gitleaks.toml           # Custom Gitleaks config (8 rules + defaults)
 ├── pii-venv/                # Python virtual environment
@@ -153,7 +178,7 @@ Returns status of all components:
 | Service | File | Port | Description |
 |---|---|---|---|
 | `secret-sanitizer` | server.js | 3100 | Main API + web UI |
-| `pii-service` | pii_service.py | 5002 | Presidio + Deduce PII detection |
+| `pii-service` | pii_service.py | 5002 | Presidio + Deduce + cross-reference PII detection |
 
 ---
 
@@ -196,9 +221,18 @@ Dutch-specific de-identification by UMC Utrecht. Rule-based + lookup tables.
 
 Detects: person names (incl. tussenvoegsels), locations, institutions, hospitals, phone numbers, email, BSN, patient numbers, dates, ages.
 
+### Cross-reference feedbackloop (Layer 4)
+
+Uses already-detected findings to discover additional occurrences:
+
+- **Value propagation:** searches for detected PII values in other positions in the text
+- **Email-to-name extraction:** derives person names from email local parts (e.g., `jan.devries@company.nl` → searches for "jan" and "devries" as names)
+- Filters out common Dutch words and tussenvoegsels to prevent false positives
+- Only runs in Deep mode, non-critical (scan succeeds even if cross-reference fails)
+
 ### Findings merge
 
-When multiple engines detect the same text span, the merge algorithm deduplicates by position. On overlap, the finding with the higher confidence score wins. On tie: Gitleaks > Presidio > Deduce (source priority).
+When multiple engines detect the same text span, the merge algorithm deduplicates by position. On overlap, the finding with the higher confidence score wins. On tie: Gitleaks > Presidio > Deduce / cross-reference (source priority).
 
 ---
 

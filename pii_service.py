@@ -1,5 +1,5 @@
 """
-PII Detection Microservice — Presidio + Deduce + Custom Dutch Recognizers
+PII Detection Microservice — Presidio + Deduce + Custom Dutch Recognizers + Cross-Reference
 Runs as Flask API on port 5002, called by the Node.js Secret Sanitizer.
 """
 
@@ -111,6 +111,127 @@ DEFAULT_ENTITIES = [
 ]
 
 
+# === Cross-Reference Feedbackloop ===
+
+# Words to skip during value propagation (common Dutch words, prepositions, etc.)
+SKIP_WORDS = {
+    "de", "het", "een", "van", "in", "op", "te", "en", "is", "dat", "die", "voor",
+    "met", "zijn", "naar", "aan", "bij", "uit", "als", "maar", "nog", "wel", "niet",
+    "ook", "dan", "kan", "moet", "zou", "zal", "heeft", "wordt", "werd", "geen",
+    "meer", "veel", "goed", "naam", "naam:", "email", "telefoon", "adres", "straat",
+    "true", "false", "null", "none", "yes", "no", "the", "and", "for", "with",
+}
+
+# Dutch tussenvoegsels — should not be propagated as standalone names
+TUSSENVOEGSELS = {
+    "van", "de", "den", "der", "het", "ten", "ter", "te", "in", "op",
+    "aan", "bij", "tot", "uit", "von", "la", "le", "du", "des",
+}
+
+
+def extract_names_from_email(email_text):
+    """Extract potential person names from email local part (before @)."""
+    local = email_text.split("@")[0] if "@" in email_text else ""
+    if not local or len(local) < 3:
+        return []
+
+    # Split on common separators: dots, underscores, hyphens
+    parts = re.split(r'[._\-]', local)
+    names = []
+    for part in parts:
+        part = part.strip()
+        # Must be at least 2 chars, alphabetic, not a common word
+        if (len(part) >= 2 and part.isalpha() and
+            part.lower() not in SKIP_WORDS and
+            part.lower() not in TUSSENVOEGSELS):
+            names.append(part)
+    return names
+
+
+def find_additional_occurrences(text, value, existing_findings):
+    """Find all occurrences of a value in text that aren't already covered by findings."""
+    if len(value) < 3:
+        return []
+
+    additional = []
+    # Use word-boundary regex for matching, case-insensitive
+    try:
+        pattern = re.compile(r'\b' + re.escape(value) + r'\b', re.IGNORECASE)
+    except re.error:
+        return []
+
+    # Collect existing covered ranges
+    covered = set()
+    for f in existing_findings:
+        for i in range(f.get("start", 0), f.get("end", 0)):
+            covered.add(i)
+
+    for match in pattern.finditer(text):
+        start, end = match.start(), match.end()
+        # Check if this span is already covered
+        if not any(i in covered for i in range(start, end)):
+            additional.append((start, end, match.group()))
+
+    return additional
+
+
+@app.route("/api/cross-reference", methods=["POST"])
+def cross_reference():
+    """Cross-reference feedbackloop: use detected PII values to find additional occurrences."""
+    data = request.get_json()
+    if not data or "text" not in data or "findings" not in data:
+        return jsonify({"error": "Requires 'text' and 'findings'"}), 400
+
+    text = data["text"]
+    findings = data["findings"]
+    additional_findings = []
+
+    # Pass 1: Value propagation — search for detected values elsewhere in text
+    for f in findings:
+        value = f.get("text", "")
+        entity_type = f.get("entity_type", "")
+
+        # Skip short values, common words, and tussenvoegsels
+        if (len(value) < 3 or
+            value.lower() in SKIP_WORDS or
+            value.lower() in TUSSENVOEGSELS):
+            continue
+
+        occurrences = find_additional_occurrences(text, value, findings + additional_findings)
+        for start, end, matched in occurrences:
+            additional_findings.append({
+                "entity_type": entity_type,
+                "start": start,
+                "end": end,
+                "score": f.get("score", 0.7),
+                "text": matched,
+                "source": "cross-reference",
+                "reason": "value-propagation"
+            })
+
+    # Pass 2: Email-to-name extraction — derive names from email addresses
+    email_findings = [f for f in findings if f.get("entity_type") in ("EMAIL_ADDRESS", "email")]
+    for ef in email_findings:
+        names = extract_names_from_email(ef.get("text", ""))
+        for name in names:
+            occurrences = find_additional_occurrences(text, name, findings + additional_findings)
+            for start, end, matched in occurrences:
+                additional_findings.append({
+                    "entity_type": "PERSON",
+                    "start": start,
+                    "end": end,
+                    "score": 0.5,
+                    "text": matched,
+                    "source": "cross-reference",
+                    "reason": "email-extraction"
+                })
+
+    return jsonify({
+        "additional_findings": additional_findings,
+        "count": len(additional_findings)
+    })
+
+
 # === API Endpoints ===
 
 @app.route("/api/presidio", methods=["POST"])
@@ -192,6 +313,7 @@ def health():
         "language": "nl",
         "model": "nl_core_news_lg",
         "deduce": "3.x",
+        "cross_reference": True,
         "custom_recognizers": ["BSN", "KVK_NUMBER", "NL_PHONE_NUMBER"]
     })
 

@@ -116,7 +116,49 @@ Install Node.js dependencies:
 pct exec <VMID> -- bash -c "cd /opt/secret-sanitizer && npm install --production"
 ```
 
-## 7. Create systemd services
+## 7. Infrastructure hardening
+
+### Temp file auto-cleanup (systemd-tmpfiles)
+
+```bash
+pct exec <VMID> -- bash -c 'cat > /etc/tmpfiles.d/secret-sanitizer.conf << EOF
+# Auto-cleanup temp files older than 5 minutes
+e /tmp/sanitize-* - - - 5m
+e /tmp/upload_* - - - 5m
+EOF'
+pct exec <VMID> -- systemd-tmpfiles --create
+```
+
+### Disable core dumps
+
+```bash
+pct exec <VMID> -- bash -c '
+  echo "kernel.core_pattern=/dev/null" >> /etc/sysctl.d/99-no-coredump.conf
+  sysctl -p /etc/sysctl.d/99-no-coredump.conf
+  mkdir -p /etc/systemd/coredump.conf.d
+  cat > /etc/systemd/coredump.conf.d/disable.conf << EOF
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+EOF
+'
+```
+
+### Limit log retention
+
+```bash
+pct exec <VMID> -- bash -c '
+  mkdir -p /etc/systemd/journald.conf.d
+  cat > /etc/systemd/journald.conf.d/retention.conf << EOF
+[Journal]
+MaxRetentionSec=48h
+SystemMaxUse=50M
+EOF
+  systemctl restart systemd-journald
+'
+```
+
+## 8. Create systemd services
 
 ### Node.js service (main API)
 
@@ -174,7 +216,7 @@ pct exec <VMID> -- bash -c "
 
 > **Note:** Start pii-service first and wait ~15 seconds for Presidio + Deduce to initialize before starting the Node.js service.
 
-## 8. Verify
+## 9. Verify
 
 ```bash
 # Service status
@@ -190,7 +232,7 @@ pct exec <VMID> -- curl -s -X POST http://localhost:3100/api/sanitize \
   -d '{"text":"Jan de Vries zijn IBAN is NL91ABNA0417164300 en token=abc123def456ghi789jkl","depth":"deep"}'
 ```
 
-## 9. Reverse proxy setup
+## 10. Reverse proxy setup
 
 Configure your reverse proxy to forward traffic to `http://<CONTAINER_IP>:3100`:
 

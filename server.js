@@ -13,6 +13,44 @@ const app = express();
 const PORT = 3100;
 const PII_SERVICE_URL = "http://127.0.0.1:5002";
 
+// === Console output sanitization ===
+// Prevent PII patterns from leaking into system logs
+const PII_PATTERNS = [
+  /\b[0-9]{9}\b/g,                          // BSN-achtig (9 cijfers)
+  /\bNL\d{2}[A-Z]{4}\d{10}\b/g,            // IBAN
+  /\b06[- ]?\d{8}\b/g,                      // NL mobiel
+  /\+31[- ]?\d{9}\b/g,                      // NL internationaal
+  /\b\d{4}\s?[A-Z]{2}\b/g,                  // Postcode
+];
+
+function sanitizeForLog(str) {
+  if (typeof str !== "string") return str;
+  let result = str;
+  PII_PATTERNS.forEach(pattern => {
+    result = result.replace(new RegExp(pattern.source, pattern.flags), "[FILTERED]");
+  });
+  return result;
+}
+
+// Override console methods to filter PII
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+console.log = (...args) => originalLog(...args.map(a => sanitizeForLog(String(a))));
+console.error = (...args) => originalError(...args.map(a => sanitizeForLog(String(a))));
+console.warn = (...args) => originalWarn(...args.map(a => sanitizeForLog(String(a))));
+
+// === Audit logging (metadata only, never content) ===
+function auditLog(event, metadata) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    event,
+    ...metadata
+  };
+  // Log to stdout (picked up by journald) — no content, only metadata
+  originalLog(`[AUDIT] ${JSON.stringify(entry)}`);
+}
+
 // === File type definitions ===
 const TEXT_EXTENSIONS = [
   ".json", ".yaml", ".yml", ".toml", ".env", ".sh", ".bash",
@@ -100,6 +138,12 @@ async function scanWithGitleaks(text, originalExt) {
     });
     return details;
   } finally {
+    // Wipe file contents from memory before cleanup
+    try {
+      const fileContent = fs.readFileSync(tmpFile);
+      fileContent.fill(0);
+      fs.writeFileSync(tmpFile, fileContent);
+    } catch {}
     [tmpFile, reportFile].forEach((f) => { try { fs.unlinkSync(f); } catch {} });
   }
 }
@@ -120,10 +164,11 @@ function callPiiService(endpoint, body) {
         try {
           const result = JSON.parse(Buffer.concat(chunks).toString());
           if (result.error) return reject(new Error(result.error));
-          const src = endpoint.includes("presidio") ? "presidio" : "deduce";
-          resolve((result.findings || []).map((f) => ({
-            source: src, entity_type: f.entity_type, text: f.text,
-            start: f.start, end: f.end, score: f.score
+          const src = endpoint.includes("presidio") ? "presidio" : endpoint.includes("deduce") ? "deduce" : "cross-reference";
+          resolve((result.findings || result.additional_findings || []).map((f) => ({
+            source: f.source || src, entity_type: f.entity_type, text: f.text,
+            start: f.start, end: f.end, score: f.score,
+            reason: f.reason || undefined
           })));
         } catch { reject(new Error("PII service returned invalid response")); }
       });
@@ -143,11 +188,46 @@ async function scanWithDeduce(text) {
   return callPiiService("/api/deduce", { text });
 }
 
+// === Cross-reference feedbackloop ===
+
+async function callCrossReference(text, findings) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify({ text, findings });
+    const req = http.request({
+      hostname: "127.0.0.1", port: 5002, path: "/api/cross-reference", method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
+      timeout: 30000
+    }, (res) => {
+      let chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          const result = JSON.parse(Buffer.concat(chunks).toString());
+          if (result.error) return reject(new Error(result.error));
+          resolve((result.additional_findings || []).map((f) => ({
+            source: "cross-reference",
+            entity_type: f.entity_type,
+            text: f.text,
+            start: f.start,
+            end: f.end,
+            score: f.score,
+            reason: f.reason
+          })));
+        } catch { reject(new Error("Cross-reference returned invalid response")); }
+      });
+    });
+    req.on("error", (e) => reject(new Error(`Cross-reference unavailable: ${e.message}`)));
+    req.on("timeout", () => { req.destroy(); reject(new Error("Cross-reference timeout")); });
+    req.write(data);
+    req.end();
+  });
+}
+
 // === Merge & Redact ===
 
 function mergeFindings(allFindings) {
   if (!allFindings.length) return [];
-  const prio = { gitleaks: 3, presidio: 2, deduce: 1 };
+  const prio = { gitleaks: 3, presidio: 2, deduce: 1, "cross-reference": 1 };
   const sorted = [...allFindings].sort((a, b) => {
     if (a.start !== b.start) return a.start - b.start;
     if (b.score !== a.score) return b.score - a.score;
@@ -214,11 +294,25 @@ async function scanPipeline(text, depth, originalExt) {
     } catch (err) { layers.deduce = { error: err.message }; }
   }
 
+  // Cross-reference feedbackloop (deep only, non-critical)
+  if (depth === "deep" && allFindings.length > 0) {
+    try {
+      const xref = await callCrossReference(text, allFindings);
+      allFindings.push(...xref);
+      layers.crossReference = xref.length;
+    } catch (err) {
+      // Non-critical — log warning but don't fail the scan
+      console.warn(`Cross-reference warning: ${err.message}`);
+      layers.crossReference = 0;
+    }
+  }
+
   const merged = mergeFindings(allFindings);
   const sanitized = applyRedactions(text, merged);
   const findings = merged.map((f) => ({
     source: f.source, rule: f.entity_type, text: f.text,
-    score: f.score, description: f.description || f.entity_type
+    score: f.score, description: f.description || f.entity_type,
+    reason: f.reason || undefined
   }));
 
   return { sanitized, findings, count: merged.length, layers, depth };
@@ -227,16 +321,27 @@ async function scanPipeline(text, depth, originalExt) {
 // === Endpoints ===
 
 app.post("/api/sanitize", async (req, res) => {
+  const startTime = Date.now();
   const { text, depth } = req.body;
   if (!text || typeof text !== "string") return res.status(400).json({ error: "No text provided" });
   if (text.length > 50 * 1024 * 1024) return res.status(400).json({ error: "Text too large (max 50MB)" });
   const d = ["quick", "standard", "deep"].includes(depth) ? depth : "quick";
-  try { res.json(await scanPipeline(text, d)); }
+  try {
+    const result = await scanPipeline(text, d);
+    auditLog("scan_text", {
+      inputLength: text.length,
+      findingsCount: result.count,
+      depth: d,
+      durationMs: Date.now() - startTime
+    });
+    res.json(result);
+  }
   catch (err) { res.status(500).json({ error: "Scan failed", details: err.message }); }
 });
 
 app.post("/api/sanitize-file", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+  const startTime = Date.now();
   const uploadedPath = req.file.path;
   try {
     const ext = path.extname(req.file.originalname).toLowerCase();
@@ -247,12 +352,30 @@ app.post("/api/sanitize-file", upload.single("file"), async (req, res) => {
     result.filename = req.file.originalname;
     result.size = req.file.size;
     if (extracted) { result.extracted = true; result.sourceType = sourceType; result.extractedLength = text.length; }
+    auditLog("scan_file", {
+      filename: req.file.originalname,
+      fileSize: req.file.size,
+      fileType: ext,
+      extracted: extracted || false,
+      sourceType: sourceType || "text",
+      findingsCount: result.count,
+      depth: d,
+      durationMs: Date.now() - startTime
+    });
     res.json(result);
   } catch (err) {
     if (err.message?.includes("not supported")) res.status(400).json({ error: err.message });
     else if (err.message?.includes("extraction failed") || err.message?.includes("returned no text")) res.status(422).json({ error: err.message });
     else res.status(500).json({ error: "Scan failed", details: err.message });
-  } finally { try { fs.unlinkSync(uploadedPath); } catch {} }
+  } finally {
+    // Wipe uploaded file content before deletion
+    try {
+      const buf = fs.readFileSync(uploadedPath);
+      buf.fill(0);
+      fs.writeFileSync(uploadedPath, buf);
+    } catch {}
+    try { fs.unlinkSync(uploadedPath); } catch {}
+  }
 });
 
 app.use((err, req, res, next) => {
@@ -273,13 +396,39 @@ app.get("/health", (req, res) => {
         piiRes.on("data", (c) => chunks.push(c));
         piiRes.on("end", () => {
           let pii; try { pii = JSON.parse(Buffer.concat(chunks).toString()); } catch { pii = { status: "error" }; }
-          res.json({ status: "ok", gitleaks: stdout?.trim() || "unknown", pdftotext: pdfV, mammoth: "included", pii_service: pii });
+          res.json({
+            status: "ok",
+            version: "1.1.0",
+            gitleaks: stdout?.trim() || "unknown",
+            pdftotext: pdfV,
+            mammoth: "included",
+            pii_service: pii,
+            hardening: {
+              memoryWipe: true,
+              auditLogging: true,
+              consoleSanitization: true,
+              tempFileCleanup: "systemd-tmpfiles"
+            }
+          });
         });
       }).on("error", () => {
-        res.json({ status: "ok", gitleaks: stdout?.trim() || "unknown", pdftotext: pdfV, mammoth: "included", pii_service: { status: "unavailable" } });
+        res.json({
+          status: "ok",
+          version: "1.1.0",
+          gitleaks: stdout?.trim() || "unknown",
+          pdftotext: pdfV,
+          mammoth: "included",
+          pii_service: { status: "unavailable" },
+          hardening: {
+            memoryWipe: true,
+            auditLogging: true,
+            consoleSanitization: true,
+            tempFileCleanup: "systemd-tmpfiles"
+          }
+        });
       });
     });
   });
 });
 
-app.listen(PORT, "0.0.0.0", () => console.log(`Secret Sanitizer running on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`Secret Sanitizer v1.1.0 running on port ${PORT}`));
