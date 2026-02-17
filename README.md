@@ -6,6 +6,18 @@ A web-based security tool that detects and redacts sensitive information from te
 
 Paste text or upload files → the sanitizer scans for secrets and PII → outputs a redacted version ready to share safely.
 
+### Features
+
+- Three-layer scan pipeline: Gitleaks (credentials) → Presidio (structured PII) → Deduce (Dutch NLP)
+- Cross-reference feedbackloop in Deep mode: propagates detected values across text and extracts person names from email addresses
+- Scan depth selector: Quick ⚡ / Standard 🔍 / Deep 🔬
+- File upload with drag & drop — supports text files, PDF, and Word (.docx) with automatic text extraction
+- Custom Gitleaks config with 8 rules extending defaults, optimized for n8n workflow patterns
+- Custom Presidio recognizers for BSN (elfproef), KvK-nummer, and Dutch phone numbers
+- Security hardening: memory wipe after processing, console PII filtering, metadata-only audit logging
+- Privacy-by-design: no persistent storage, no content logging, temp file auto-cleanup, core dumps disabled
+- Dark theme UI with findings panel, layer badges, scan history, privacy notice, and copy-to-clipboard
+
 ### Detection engines
 
 Secret Sanitizer uses a three-layer scan pipeline with cross-reference feedbackloop. Each layer adds deeper detection:
