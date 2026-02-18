@@ -4,6 +4,8 @@ Runs as Flask API on port 5002, called by the Node.js Secret Sanitizer.
 """
 
 from flask import Flask, request, jsonify
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern, RecognizerResult
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from deduce import Deduce
@@ -14,6 +16,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pii-service")
 
 app = Flask(__name__)
+
+# Rate limiting — defense in depth alongside Node.js rate limiter
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["30 per minute"],
+    storage_uri="memory://"
+)
 
 # === Custom Recognizers ===
 
@@ -176,6 +186,7 @@ def find_additional_occurrences(text, value, existing_findings):
 
 
 @app.route("/api/cross-reference", methods=["POST"])
+@limiter.limit("30 per minute")
 def cross_reference():
     """Cross-reference feedbackloop: use detected PII values to find additional occurrences."""
     data = request.get_json()
@@ -184,6 +195,18 @@ def cross_reference():
 
     text = data["text"]
     findings = data["findings"]
+
+    # Validate findings input (#5)
+    if not isinstance(findings, list):
+        return jsonify({"error": "'findings' must be a list"}), 400
+    findings = [
+        f for f in findings
+        if isinstance(f, dict)
+        and isinstance(f.get("text"), str)
+        and isinstance(f.get("start"), int)
+        and isinstance(f.get("end"), int)
+    ]
+
     additional_findings = []
 
     # Pass 1: Value propagation — search for detected values elsewhere in text
@@ -235,6 +258,7 @@ def cross_reference():
 # === API Endpoints ===
 
 @app.route("/api/presidio", methods=["POST"])
+@limiter.limit("30 per minute")
 def analyze_presidio():
     data = request.get_json()
     if not data or "text" not in data:
@@ -244,8 +268,13 @@ def analyze_presidio():
     threshold = data.get("threshold", 0.5)
     entities = data.get("entities", DEFAULT_ENTITIES)
 
-    if len(text) > 2 * 1024 * 1024:
-        return jsonify({"error": "Text too large (max 2MB)"}), 400
+    # Filter to known entity types only (#4)
+    entities = [e for e in entities if e in DEFAULT_ENTITIES]
+    if not entities:
+        entities = DEFAULT_ENTITIES
+
+    if len(text) > 50 * 1024 * 1024:
+        return jsonify({"error": "Text too large (max 50MB)"}), 400
 
     try:
         results = analyzer.analyze(
@@ -269,11 +298,12 @@ def analyze_presidio():
         return jsonify({"findings": findings, "count": len(findings)})
 
     except Exception as e:
-        logger.error(f"Presidio analysis failed: {e}")
-        return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
+        logger.error(f"Presidio analysis failed: {type(e).__name__}")
+        return jsonify({"error": "Analysis failed"}), 500
 
 
 @app.route("/api/deduce", methods=["POST"])
+@limiter.limit("30 per minute")
 def analyze_deduce():
     data = request.get_json()
     if not data or "text" not in data:
@@ -281,8 +311,8 @@ def analyze_deduce():
 
     text = data["text"]
 
-    if len(text) > 2 * 1024 * 1024:
-        return jsonify({"error": "Text too large (max 2MB)"}), 400
+    if len(text) > 50 * 1024 * 1024:
+        return jsonify({"error": "Text too large (max 50MB)"}), 400
 
     try:
         doc = deduce_instance.deidentify(text)
@@ -301,11 +331,12 @@ def analyze_deduce():
         return jsonify({"findings": findings, "count": len(findings)})
 
     except Exception as e:
-        logger.error(f"Deduce analysis failed: {e}")
-        return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
+        logger.error(f"Deduce analysis failed: {type(e).__name__}")
+        return jsonify({"error": "Analysis failed"}), 500
 
 
 @app.route("/health", methods=["GET"])
+@limiter.exempt
 def health():
     return jsonify({
         "status": "ok",
@@ -318,5 +349,21 @@ def health():
     })
 
 
+# === Global error handler — never leak internal details or PII ===
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Unhandled error: {type(e).__name__}")
+    return jsonify({"error": "Internal server error"}), 500
+
+@app.errorhandler(400)
+def handle_400(e):
+    return jsonify({"error": "Bad request"}), 400
+
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({"error": "Not found"}), 404
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5002)
+    app.run(host="0.0.0.0", port=5002, debug=False)

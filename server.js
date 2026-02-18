@@ -322,12 +322,16 @@ async function scanPipeline(text, depth, originalExt) {
 
 app.post("/api/sanitize", async (req, res) => {
   const startTime = Date.now();
-  const { text, depth } = req.body;
+  const { text, depth, debug } = req.body;
   if (!text || typeof text !== "string") return res.status(400).json({ error: "No text provided" });
   if (text.length > 50 * 1024 * 1024) return res.status(400).json({ error: "Text too large (max 50MB)" });
   const d = ["quick", "standard", "deep"].includes(depth) ? depth : "quick";
   try {
     const result = await scanPipeline(text, d);
+    // Strip PII from findings unless debug mode is requested (#7)
+    if (!debug) {
+      result.findings = result.findings.map(({ text, ...rest }) => rest);
+    }
     auditLog("scan_text", {
       inputLength: text.length,
       findingsCount: result.count,
@@ -348,7 +352,12 @@ app.post("/api/sanitize-file", upload.single("file"), async (req, res) => {
     const { text, extracted, sourceType } = await extractText(uploadedPath, ext);
     const scanExt = extracted ? ".txt" : ext;
     const d = ["quick", "standard", "deep"].includes(req.body?.depth) ? req.body.depth : "quick";
+    const debugMode = req.body?.debug === "true" || req.body?.debug === true;
     const result = await scanPipeline(text, d, scanExt);
+    // Strip PII from findings unless debug mode is requested (#7)
+    if (!debugMode) {
+      result.findings = result.findings.map(({ text, ...rest }) => rest);
+    }
     result.filename = req.file.originalname;
     result.size = req.file.size;
     if (extracted) { result.extracted = true; result.sourceType = sourceType; result.extractedLength = text.length; }

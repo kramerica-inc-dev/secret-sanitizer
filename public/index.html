@@ -192,7 +192,7 @@ Supports text files, .json, .yaml, .toml, .env, .sh, .log, .md, .pdf, .docx and 
 </ul>
 <h3>What is retained</h3>
 <ul>
-<li><strong>Scan history:</strong> Stored in your browser (localStorage), not on the server. Expires automatically after 24 hours. You can clear it anytime via the History button.</li>
+<li><strong>Scan history:</strong> Disabled by default. When enabled, stores only metadata and sanitized output in your browser (localStorage) — never original input text. Expires automatically after 24 hours.</li>
 <li><strong>Audit logs:</strong> Metadata only — timestamp, scan depth, findings count, file type and size. Automatically deleted after 48 hours.</li>
 </ul>
 <h3>Security</h3>
@@ -345,10 +345,7 @@ function showResult(data,previewText){
       var type=document.createElement("span");
       type.className="finding-type";
       type.textContent=f.rule;
-      var txt=document.createElement("span");
-      txt.className="finding-text";
-      txt.textContent=f.text.length>60?f.text.substring(0,60)+"...":f.text;
-      row.appendChild(src);row.appendChild(type);row.appendChild(txt);
+      row.appendChild(src);row.appendChild(type);
       if(f.reason){
         var reason=document.createElement("span");
         reason.className="finding-reason";
@@ -365,9 +362,11 @@ function showResult(data,previewText){
   document.getElementById("status").textContent=st;
   document.getElementById("lastRun").textContent="Last run: "+new Date().toLocaleTimeString();
 
-  var inputText=currentTab==="text"?document.getElementById("input").value:("[File] "+data.filename);
-  history.unshift({ts:Date.now(),preview:previewText,findings:count,depth:data.depth,input:inputText,output:data.sanitized,extracted:data.extracted||false,sourceType:data.sourceType||null});
-  saveHistory();
+  // History stores only metadata + sanitized output — never original input (#8)
+  if(historyEnabled){
+    history.unshift({ts:Date.now(),preview:previewText,findings:count,depth:data.depth,output:data.sanitized,extracted:data.extracted||false,sourceType:data.sourceType||null,filename:data.filename||null});
+    saveHistory();
+  }
 }
 
 function copyOutput(){
@@ -416,14 +415,15 @@ function renderHistory(){
 
 function restoreHistory(i){
   var h=history[i];if(!h)return;
-  if(h.input.startsWith("[File] "))switchTab("text");
-  document.getElementById("input").value=h.input;
+  switchTab("text");
+  document.getElementById("input").value="";
   var ph=document.getElementById("outputPlaceholder");if(ph)ph.style.display="none";
   document.getElementById("output").textContent=h.output;
   var badge=document.getElementById("findingsBadge");
   badge.innerHTML=h.findings>0?'<span class="findings-badge">'+h.findings+" finding"+(h.findings>1?"s":"")+'</span>':'<span class="findings-badge clean">Clean \u2713</span>';
   document.getElementById("layerBadges").classList.add("hidden");
   document.getElementById("findingsPanel").classList.add("hidden");
+  document.getElementById("charCount").textContent="0 chars";
   toggleHistory();showToast("Restored from history");
 }
 
