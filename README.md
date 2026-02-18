@@ -88,18 +88,32 @@ Redacted output + findings report
 
 ---
 
-## Privacy & Security
+## Privacy & Data Protection
 
-Secret Sanitizer is designed with **data minimization** as its core principle:
+Secret Sanitizer is designed with **data minimization** as its core principle. Your data is processed, not stored.
 
-- **Local processing only** — nothing is sent to external services
-- **No persistent storage** — text and files are wiped from memory immediately after processing
-- **Memory wipe** — temp files overwritten with zeros before deletion
-- **No content logging** — audit logs contain only metadata (timing, counts, file type)
-- **Console sanitization** — PII patterns (BSN, IBAN, phone numbers) filtered from all log output
-- **Temp file cleanup** — systemd-tmpfiles automatically removes files older than 5 minutes
-- **Core dumps disabled** — prevents memory content from being written to disk
-- **Log retention** — journal logs automatically deleted after 48 hours
+### How your data is processed
+
+- **Local processing:** All scans run on the server — nothing is sent to external services
+- **No storage:** Text and files are wiped from memory immediately after processing (memory wipe)
+- **Temp files:** Temporary files are deleted after each scan and automatically cleaned up by the system
+- **No content logging:** Logs contain only metadata (timing, counts, file type) — never the content of your text or files
+- **Console filtering:** PII patterns (BSN, IBAN, phone numbers) are automatically filtered from all log output
+
+### What is retained
+
+- **Scan history:** Stored in your browser (localStorage), not on the server. Expires automatically after 24 hours. You can clear it anytime via the History button.
+- **Audit logs:** Metadata only — timestamp, scan depth, findings count, file type and size. Automatically deleted after 48 hours.
+
+### Security
+
+- HTTPS encryption (SSL/TLS)
+- Two-factor authentication (Authelia 2FA)
+- Rate limiting on all API endpoints
+- Core dumps disabled
+- Security headers via Helmet
+
+> Secret Sanitizer • No external services • No tracking • No cookies
 
 ---
 
