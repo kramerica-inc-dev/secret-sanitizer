@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.1.0] — 2026-02-17: Security Hardening + Cross-Reference Feedbackloop
+## [1.1.0] — 2026-02-18: Security Hardening, Cross-Reference & Privacy Audit
 
 ### Added
 
@@ -23,17 +23,31 @@
 - Privacy link (🔒) in status bar
 - Modal covers: local processing, no storage, memory wipe, console filtering, audit logging, scan history (localStorage), security measures
 
+**Privacy audit fixes**
+- Flask-limiter rate limiting (30/min) on all PII service endpoints; health endpoint exempt
+- Entities parameter validation — unknown entity types silently filtered against known list, falls back to defaults
+- Cross-reference input validation — type checks on findings objects (requires `text` as string, `start`/`end` as integers)
+- Debug mode — `debug: true` in API request body preserves original PII text in findings response; disabled by default
+- Findings response stripped of PII — `text` field removed from findings unless debug mode is enabled
+- History no longer stores original input — only metadata and sanitized output saved to localStorage
+- PII service error messages — generic "Analysis failed" responses; only exception type name logged, never details or PII
+
 **Frontend**
 - Cross-reference layer badge (purple) in layer badges panel
 - Findings panel shows `x-ref` source tag with reason indicator (propagated / from email)
+- Findings panel shows only source + entity type (no original PII text)
 - Deep mode label updated to mention cross-reference
 - Version shown in privacy modal
 - Scan history off by default — toggle switch in history drawer to enable (stored in localStorage)
+- Restore from history clears input panel instead of restoring original text
 
 ### Changed
-- `server.js`: version in health endpoint, console sanitization active on startup, audit entries on every scan
-- `pii_service.py`: new `/api/cross-reference` endpoint, health endpoint includes `cross_reference: true`
+- `server.js`: version in health endpoint, console sanitization active on startup, audit entries on every scan, debug flag support, PII stripping from findings
+- `pii_service.py`: new `/api/cross-reference` endpoint, rate limiting, input validation, generic error messages
 - `package.json`: version bumped to 1.1.0
+
+### Dependencies added
+- `flask-limiter` (pip) — rate limiting for Flask PII service
 
 ### Infrastructure hardening (deployment steps)
 These are applied at the OS level during deployment, not in the application code:

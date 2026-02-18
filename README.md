@@ -102,7 +102,7 @@ Secret Sanitizer is designed with **data minimization** as its core principle. Y
 
 ### What is retained
 
-- **Scan history:** Stored in your browser (localStorage), not on the server. Expires automatically after 24 hours. You can clear it anytime via the History button.
+- **Scan history:** Disabled by default. When enabled, stores only metadata and sanitized output in your browser (localStorage) — never original input text. Expires automatically after 24 hours.
 - **Audit logs:** Metadata only — timestamp, scan depth, findings count, file type and size. Automatically deleted after 48 hours.
 
 ### Security
@@ -126,22 +126,26 @@ Scan pasted text.
 ```json
 {
   "text": "Jan de Vries heeft IBAN NL91ABNA0417164300",
-  "depth": "deep"
+  "depth": "deep",
+  "debug": false
 }
 ```
 
-Response:
+Response (default — PII stripped from findings):
 ```json
 {
   "sanitized": "[PERSON] heeft IBAN [IBAN_CODE]",
   "findings": [
-    {"source": "presidio", "rule": "PERSON", "text": "Jan de Vries", "score": 0.85},
-    {"source": "presidio", "rule": "IBAN_CODE", "text": "NL91ABNA0417164300", "score": 1.0}
+    {"source": "presidio", "rule": "PERSON", "score": 0.85},
+    {"source": "presidio", "rule": "IBAN_CODE", "score": 1.0}
   ],
   "count": 2,
   "layers": {"gitleaks": 0, "presidio": 2, "deduce": 1, "crossReference": 0},
   "depth": "deep"
 }
+```
+
+With `"debug": true`, findings include the original `text` field for diagnostic purposes.
 ```
 
 ### `POST /api/sanitize-file`
@@ -150,6 +154,7 @@ Scan uploaded file (multipart/form-data).
 
 - Field `file`: the file to scan
 - Field `depth`: `"quick"`, `"standard"`, or `"deep"`
+- Field `debug`: `"true"` to include original PII text in findings (optional)
 
 Returns the same response format, plus `filename`, `size`, and for PDF/Word: `extracted`, `sourceType`, `extractedLength`.
 
